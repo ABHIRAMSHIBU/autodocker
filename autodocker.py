@@ -2,6 +2,9 @@ import yaml
 import os
 from string import Template
 from pprint import pprint
+from threading import Thread, Lock
+from queue import Queue
+import time
 
 def read_yaml_config(file_path):
     with open(file_path, 'r') as file:
@@ -69,26 +72,48 @@ def create_dockerfile(platform, cmake_info, project_info, qemu_info, cmake_versi
     ]
     return "\n".join(sections)
 
+def docker_worker(dockerfile_path, image_name, container_name, status, status_lock):
+    """Worker function to handle Docker build and run operations"""
+    # Build Docker image
+    build_code = os.system(f"docker buildx build -f {dockerfile_path} -t {image_name} .")
+    
+    if build_code != 0:
+        with status_lock:
+            status[container_name] = build_code
+        print(f"Docker build failed for {container_name} with code {build_code}")
+        return
+
+    # Run container
+    exit_code = os.system(f"docker run -it --name {container_name} --replace {image_name}")
+    
+    with status_lock:
+        status[container_name] = exit_code
+    
+    if exit_code != 0:
+        print(f"Container {container_name} exited with code {exit_code}")
+    else:
+        print(f"Container {container_name} ran successfully")
+    
+    # Cleanup
+    os.system(f"docker rm {container_name}")
+
 def main():
     status = {}
+    status_lock = Lock()
+    threads = []
     config = read_yaml_config('aocl-utils.yaml')
     
-    # Create build directory if it doesn't exist
     if not os.path.exists('build'):
         os.makedirs('build')
     
-    # Generate Dockerfile for each platform
     for platform in config['platforms']:
-        # Iterate over CMake versions if platform depends on CMake
         cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
         
         for cmake_version in cmake_versions:
-            # Generate Dockerfile
             dockerfile_content = create_dockerfile(platform, config['cmake'], 
                                                 config['project'], config['qemu'],
                                                 cmake_version)
             
-            # Create platform-specific + cmake-version-specific names
             version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
             platform_tag = platform['version'] if platform['version'] != 'latest' else platform['image']
             
@@ -96,26 +121,23 @@ def main():
             image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{platform_tag}{version_suffix}"
             container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}{version_suffix}"
             
-            # Write Dockerfile and build image
+            # Write Dockerfile
             with open(dockerfile_path, 'w') as f:
                 f.write(dockerfile_content)
             
-            os.system(f"docker buildx build -f {dockerfile_path} -t {image_name} .")
-            
-            # Run and cleanup container
-            exit_code = os.system(f"docker run -it --name {container_name} --replace {image_name}")
-            status[container_name] = exit_code
-            
-            if exit_code != 0:
-                print(f"Container {container_name} exited with code {exit_code}")
-            else:
-                print(f"Container {container_name} ran successfully")
-            
-            os.system(f"docker rm {container_name}")
+            # Create and start worker thread
+            thread = Thread(target=docker_worker, 
+                          args=(dockerfile_path, image_name, container_name, status, status_lock))
+            threads.append(thread)
+            thread.start()
     
-    print("Results:")
+    # Wait for all threads to complete
+    for thread in threads:
+        thread.join()
+    
+    print("\nResults:")
     pprint(status)
     print("Overall status: ", "Failed" if any(status.values()) else "Success")
-        
+
 if __name__ == "__main__":
     main()
