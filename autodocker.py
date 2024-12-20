@@ -21,15 +21,15 @@ RUN {platform['update-cmd']}
 RUN {platform['requirements-cmd']}
 """
 
-def get_cmake_setup(platform, cmake_info):
+def get_cmake_setup(platform, cmake_info, cmake_version):
     """Generate CMake installation if needed"""
     if 'cmake' not in platform.get('depends', []):
         return ""
     
-    return f"""# Install CMake
+    return f"""# Install CMake {cmake_version}
 WORKDIR /tmp
-RUN wget {cmake_info['url'].replace('<version>', cmake_info['versions'][0])}
-RUN bash cmake-{cmake_info['versions'][0]}-linux-x86_64.sh --skip-license --prefix=/usr/local
+RUN wget {cmake_info['url'].replace('<version>', cmake_version)}
+RUN bash cmake-{cmake_version}-linux-x86_64.sh --skip-license --prefix=/usr/local
 """
 
 def get_qemu_setup(platform, qemu_info):
@@ -59,12 +59,12 @@ RUN {project_info['install-cmd']}
 CMD {project_info['test-cmd']}
 """
 
-def create_dockerfile(platform, cmake_info, project_info, qemu_info):
+def create_dockerfile(platform, cmake_info, project_info, qemu_info, cmake_version):
     """Combine all Dockerfile sections"""
     sections = [
         get_base_setup(platform),
-        get_cmake_setup(platform, cmake_info),
         get_qemu_setup(platform, qemu_info),
+        get_cmake_setup(platform, cmake_info, cmake_version),
         get_project_setup(project_info)
     ]
     return "\n".join(sections)
@@ -79,31 +79,39 @@ def main():
     
     # Generate Dockerfile for each platform
     for platform in config['platforms']:
-        dockerfile_content = create_dockerfile(platform, config['cmake'], 
-                                            config['project'], config['qemu'])
+        # Iterate over CMake versions if platform depends on CMake
+        cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
         
-        # Write Dockerfile
-        dockerfile_path = f"build/Dockerfile.{platform['name'].lower().replace(' ', '-')}"
-        with open(dockerfile_path, 'w') as f:
-            f.write(dockerfile_content)
-        
-        # Build Docker image using buildx
-        image_tag = platform['version'] if platform['version'] != 'latest' else platform['image']
-        image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{image_tag}"
-        os.system(f"docker buildx build -f {dockerfile_path} -t {image_name} .")
-
-        # Run Docker container
-        container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}"
-        exit_code = os.system(f"docker run -it --name {container_name} --replace {image_name}")
-        
-        status[container_name] = exit_code
-        if exit_code != 0:
-            print(f"Container {container_name} exited with code {exit_code}")
-        else:
-            print(f"Container {container_name} ran successfully")
-        
-        # Clean up the container
-        os.system(f"docker rm {container_name}")
+        for cmake_version in cmake_versions:
+            # Generate Dockerfile
+            dockerfile_content = create_dockerfile(platform, config['cmake'], 
+                                                config['project'], config['qemu'],
+                                                cmake_version)
+            
+            # Create platform-specific + cmake-version-specific names
+            version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
+            platform_tag = platform['version'] if platform['version'] != 'latest' else platform['image']
+            
+            dockerfile_path = f"build/Dockerfile.{platform['name'].lower().replace(' ', '-')}{version_suffix}"
+            image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{platform_tag}{version_suffix}"
+            container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}{version_suffix}"
+            
+            # Write Dockerfile and build image
+            with open(dockerfile_path, 'w') as f:
+                f.write(dockerfile_content)
+            
+            os.system(f"docker buildx build -f {dockerfile_path} -t {image_name} .")
+            
+            # Run and cleanup container
+            exit_code = os.system(f"docker run -it --name {container_name} --replace {image_name}")
+            status[container_name] = exit_code
+            
+            if exit_code != 0:
+                print(f"Container {container_name} exited with code {exit_code}")
+            else:
+                print(f"Container {container_name} ran successfully")
+            
+            os.system(f"docker rm {container_name}")
     
     print("Results:")
     pprint(status)

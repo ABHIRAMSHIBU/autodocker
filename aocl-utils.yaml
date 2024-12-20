@@ -3,7 +3,7 @@ platforms:
     image: ubuntu
     version: 22.04
     update-cmd: "apt update; apt upgrade -y"
-    requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build libglib2.0-dev flex bison"
+    requirements-cmd: "apt install -y build-essential cmake git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build libglib2.0-dev flex bison"
     depends:
       - cmake
       - qemu
@@ -18,7 +18,7 @@ platforms:
     image: archlinux
     version: latest
     update-cmd: "pacman -Syu --noconfirm"
-    requirements-cmd: "pacman -Syu --noconfirm base-devel git vim clang gcc lsb-release curl wget python python-pip ninja qemu-user"
+    requirements-cmd: "pacman -Syu --noconfirm base-devel  git vim clang gcc lsb-release curl wget python python-pip ninja qemu-user"
     depends:
       - cmake
 
