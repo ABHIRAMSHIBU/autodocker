@@ -75,13 +75,14 @@ def create_dockerfile(platform, cmake_info, project_info, qemu_info, cmake_versi
 
 def run_command(cmd, logfile):
     """Run a command and log its output"""
-    with open(logfile, 'w') as f:
+    with open(logfile, 'w', buffering=1) as f:
         process = subprocess.Popen(
             cmd,
             shell=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            universal_newlines=True
+            universal_newlines=True,
+            bufsize=1
         )
         
         for line in process.stdout:
@@ -170,7 +171,7 @@ def docker_worker(dockerfile_path, image_name, container_name, status, status_lo
 
     # Run container
     run_log = os.path.join(log_dir, f'run_{timestamp}.log')
-    run_cmd = f"docker run -it --name {container_name} --replace {image_name}"
+    run_cmd = f"docker run --name {container_name} --replace {image_name}"
     exit_code = run_command(run_cmd, run_log)
     
     with status_lock:
