@@ -207,6 +207,29 @@ def print_failure_logs(status, print_manager):
                 print_manager.print("\nRun log:")
                 print_manager.print_file(result['run_log'])
 
+def platform_worker(platform, config, status, status_lock, print_manager):
+    """Worker function to handle all containers for a single platform"""
+    cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
+    
+    for cmake_version in cmake_versions:
+        dockerfile_content = create_dockerfile(platform, config['cmake'], 
+                                            config['project'], config['qemu'],
+                                            cmake_version)
+        
+        version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
+        platform_tag = platform['version'] if platform['version'] != 'latest' else platform['image']
+        
+        dockerfile_path = f"build/Dockerfile.{platform['name'].lower().replace(' ', '-')}{version_suffix}"
+        image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{platform_tag}{version_suffix}"
+        container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}{version_suffix}"
+        
+        # Write Dockerfile
+        with open(dockerfile_path, 'w') as f:
+            f.write(dockerfile_content)
+        
+        # Process this platform's container
+        docker_worker(dockerfile_path, image_name, container_name, status, status_lock, print_manager)
+
 def main():
     status = {}
     status_lock = Lock()
@@ -218,31 +241,12 @@ def main():
     for dir in ['build', 'logs']:
         os.makedirs(dir, exist_ok=True)
     
+    # Create one thread per platform
     for platform in config['platforms']:
-        cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
-        
-        for cmake_version in cmake_versions:
-            dockerfile_content = create_dockerfile(platform, config['cmake'], 
-                                                config['project'], config['qemu'],
-                                                cmake_version)
-            
-            version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
-            platform_tag = platform['version'] if platform['version'] != 'latest' else platform['image']
-            
-            dockerfile_path = f"build/Dockerfile.{platform['name'].lower().replace(' ', '-')}{version_suffix}"
-            image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{platform_tag}{version_suffix}"
-            container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}{version_suffix}"
-            
-            # Write Dockerfile
-            with open(dockerfile_path, 'w') as f:
-                f.write(dockerfile_content)
-            
-            # Create and start worker thread
-            thread = Thread(target=docker_worker, 
-                          args=(dockerfile_path, image_name, container_name, 
-                                status, status_lock, print_manager))
-            threads.append(thread)
-            thread.start()
+        thread = Thread(target=platform_worker,
+                       args=(platform, config, status, status_lock, print_manager))
+        threads.append(thread)
+        thread.start()
     
     # Wait for all threads to complete
     for thread in threads:
