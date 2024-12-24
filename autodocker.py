@@ -5,7 +5,9 @@ from threading import Thread, Lock
 import subprocess
 from datetime import datetime
 import sys
+import argparse
 from queue import Queue, Empty
+from platform_utils import can_build_platform, process_requirements_cmd
 
 def read_yaml_config(file_path):
     with open(file_path, 'r') as file:
@@ -22,7 +24,7 @@ def get_base_setup(platform):
 RUN {platform['update-cmd']}
 
 # Install requirements
-RUN {platform['requirements-cmd']}
+RUN {process_requirements_cmd(platform)}
 """
 
 def get_cmake_setup(platform, cmake_info, cmake_version):
@@ -73,7 +75,7 @@ def create_dockerfile(platform, cmake_info, project_info, qemu_info, cmake_versi
     ]
     return "\n".join(sections)
 
-def run_command(cmd, logfile):
+def run_command(cmd, logfile, verbose=False):
     """Run a command and log its output"""
     with open(logfile, 'w', buffering=1) as f:
         process = subprocess.Popen(
@@ -88,6 +90,9 @@ def run_command(cmd, logfile):
         for line in process.stdout:
             f.write(line)
             f.flush()
+            if verbose:
+                sys.stdout.write(line)
+                sys.stdout.flush()
         
         process.wait()
         return process.returncode
@@ -148,16 +153,16 @@ class PrintManager:
         if self.printer_thread.is_alive():
             self.printer_thread.join(timeout=1.0)
 
-def docker_worker(dockerfile_path, image_name, container_name, status, status_lock, print_manager):
+def docker_worker(dockerfile_path, image_name, container_name, status, status_lock, print_manager, project_info, debug=False, verbose=False):
     """Worker function to handle Docker build and run operations"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_dir = os.path.join('logs', container_name)
     os.makedirs(log_dir, exist_ok=True)
     
-    # Build Docker image
+    # Build Docker image from parent directory to include scripts
     build_log = os.path.join(log_dir, f'build_{timestamp}.log')
     build_cmd = f"docker buildx build -f {dockerfile_path} -t {image_name} ."
-    build_code = run_command(build_cmd, build_log)
+    build_code = run_command(build_cmd, build_log, verbose)
     
     if build_code != 0:
         with status_lock:
@@ -169,10 +174,11 @@ def docker_worker(dockerfile_path, image_name, container_name, status, status_lo
         print_manager.print(f"\nDocker build failed for {container_name}. Check logs at {build_log}")
         return
 
-    # Run container
+    # Run container with docker-opts from project config
     run_log = os.path.join(log_dir, f'run_{timestamp}.log')
-    run_cmd = f"docker run --name {container_name} --replace {image_name}"
-    exit_code = run_command(run_cmd, run_log)
+    docker_opts = project_info.get('docker-opts', '')
+    run_cmd = f"docker run {docker_opts} --name {container_name} --replace {image_name}"
+    exit_code = run_command(run_cmd, run_log, verbose)
     
     with status_lock:
         status[container_name] = {
@@ -186,6 +192,12 @@ def docker_worker(dockerfile_path, image_name, container_name, status, status_lo
               if exit_code != 0 else 
               f"\nContainer {container_name} succeeded. Logs at {run_log}")
     print_manager.print(message)
+    
+    # Launch debug shell if test failed and debug mode is enabled
+    if exit_code != 0 and debug:
+        print_manager.print(f"\nLaunching debug shell in container {container_name}...")
+        debug_cmd = f"docker run -it --entrypoint /bin/bash {docker_opts} {image_name}"
+        subprocess.run(debug_cmd, shell=True)
     
     # Cleanup
     cleanup_log = os.path.join(log_dir, f'cleanup_{timestamp}.log')
@@ -207,7 +219,13 @@ def print_failure_logs(status, print_manager):
                 print_manager.print("\nRun log:")
                 print_manager.print_file(result['run_log'])
 
-def platform_worker(platform, config, status, status_lock, print_manager):
+def sanitize_tag(tag):
+    """Sanitize tag name to be compatible with Docker/Podman"""
+    # Convert tag to string if it's a number
+    tag = str(tag)
+    return tag.replace('/', '-').replace(':', '-')
+
+def platform_worker(platform, config, status, status_lock, print_manager, debug=False, verbose=False):
     """Worker function to handle all containers for a single platform"""
     cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
     
@@ -217,7 +235,7 @@ def platform_worker(platform, config, status, status_lock, print_manager):
                                             cmake_version)
         
         version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
-        platform_tag = platform['version'] if platform['version'] != 'latest' else platform['image']
+        platform_tag = sanitize_tag(platform['version'] if platform['version'] != 'latest' else platform['image'])
         
         dockerfile_path = f"build/Dockerfile.{platform['name'].lower().replace(' ', '-')}{version_suffix}"
         image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{platform_tag}{version_suffix}"
@@ -228,9 +246,18 @@ def platform_worker(platform, config, status, status_lock, print_manager):
             f.write(dockerfile_content)
         
         # Process this platform's container
-        docker_worker(dockerfile_path, image_name, container_name, status, status_lock, print_manager)
+        docker_worker(dockerfile_path, image_name, container_name, 
+                     status, status_lock, print_manager, config['project'], debug, verbose)
 
 def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Build and test in Docker containers')
+    parser.add_argument('--debug', action='store_true', help='Launch a shell in the container if tests fail')
+    parser.add_argument('--verbose', action='store_true', help='Print build and run output in real-time')
+    parser.add_argument('--threading-level', choices=['platform', 'docker'], default='platform',
+                       help='Control threading level: "platform" (one thread per platform) or "docker" (one thread per docker operation)')
+    args = parser.parse_args()
+
     status = {}
     status_lock = Lock()
     print_manager = PrintManager()
@@ -241,12 +268,47 @@ def main():
     for dir in ['build', 'logs']:
         os.makedirs(dir, exist_ok=True)
     
-    # Create one thread per platform
-    for platform in config['platforms']:
-        thread = Thread(target=platform_worker,
-                       args=(platform, config, status, status_lock, print_manager))
-        threads.append(thread)
-        thread.start()
+    if args.threading_level == 'platform':
+        # Platform-level threading (original behavior)
+        for platform in config['platforms']:
+            if not can_build_platform(platform):
+                print_manager.print(f"\nSkipping {platform['name']}: Required configuration not available")
+                continue
+                
+            thread = Thread(target=platform_worker,
+                          args=(platform, config, status, status_lock, print_manager, args.debug, args.verbose))
+            threads.append(thread)
+            thread.start()
+    else:
+        # Docker-level threading (more parallel)
+        for platform in config['platforms']:
+            if not can_build_platform(platform):
+                print_manager.print(f"\nSkipping {platform['name']}: Required configuration not available")
+                continue
+            
+            cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
+            for cmake_version in cmake_versions:
+                dockerfile_content = create_dockerfile(platform, config['cmake'], 
+                                                    config['project'], config['qemu'],
+                                                    cmake_version)
+                
+                version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
+                platform_tag = sanitize_tag(platform['version'] if platform['version'] != 'latest' else platform['image'])
+                
+                dockerfile_path = f"build/Dockerfile.{platform['name'].lower().replace(' ', '-')}{version_suffix}"
+                image_name = f"{config['project']['name'].lower().replace(' ', '-')}:{platform_tag}{version_suffix}"
+                container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}{version_suffix}"
+                
+                # Write Dockerfile
+                with open(dockerfile_path, 'w') as f:
+                    f.write(dockerfile_content)
+                
+                # Create a thread for each docker operation
+                thread = Thread(target=docker_worker,
+                              args=(dockerfile_path, image_name, container_name, 
+                                   status, status_lock, print_manager, config['project'], args.debug, args.verbose))
+                threads.append(thread)
+                thread.start()
     
     # Wait for all threads to complete
     for thread in threads:
