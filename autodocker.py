@@ -55,6 +55,21 @@ RUN {qemu_info['build-cmd']}
 RUN {qemu_info['install-cmd']}
 """
 
+def get_python_setup(platform, python_info):
+    """Generate Python build and installation if needed"""
+    if 'python' not in platform.get('depends', []):
+        return ""
+    
+    return f"""# Build and Install Python
+WORKDIR /tmp
+RUN wget {python_info['url'].replace('<version>', python_info['version'])}
+RUN tar xf Python-{python_info['version']}.tar.xz
+WORKDIR /tmp/Python-{python_info['version']}
+RUN {python_info['configure-cmd']}
+RUN {python_info['build-cmd']}
+RUN {python_info['install-cmd']}
+"""
+
 def get_project_setup(project_info):
     """Generate project build commands"""
     return f"""# Clone and build project
@@ -67,10 +82,11 @@ RUN {project_info['install-cmd']}
 CMD {project_info['test-cmd']}
 """
 
-def create_dockerfile(platform, cmake_info, project_info, qemu_info, cmake_version):
+def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info, cmake_version):
     """Combine all Dockerfile sections"""
     sections = [
         get_base_setup(platform),
+        get_python_setup(platform, python_info),
         get_qemu_setup(platform, qemu_info),
         get_cmake_setup(platform, cmake_info, cmake_version),
         get_project_setup(project_info)
@@ -387,7 +403,7 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
         progress_manager.update_stage(container_name, 'dockerfile')
         dockerfile_content = create_dockerfile(platform, config['cmake'], 
                                             config['project'], config['qemu'],
-                                            cmake_version)
+                                            config['python'], cmake_version)
         with open(dockerfile_path, 'w') as f:
             f.write(dockerfile_content)
         
