@@ -21,14 +21,14 @@ platforms:
     requirements-cmd: "pacman -Syu --noconfirm base-devel git vim clang gcc lsb-release curl wget python python-pip ninja qemu-user"
     depends:
       - cmake
-  # - name: RHEL 9
-  #   image: redhat/ubi9
-  #   version: latest
-  #   update-cmd: "dnf update -y"
-  #   requirements-cmd: "subscription-manager register --org=<ORG> --activationkey='<ACTIVATION_KEY>' ;dnf group install 'Development Tools';dnf install --allowerasing -y git vim clang gcc gcc-c++ curl wget python3 python3-pip python3-devel ninja-build glib2-devel flex bison xz bzip2 wget; subscription-manager unregister; subscription-manager clean"    
-  #   depends:
-  #     - cmake
-  #     - qemu
+  - name: RHEL 9
+    image: redhat/ubi9
+    version: latest
+    update-cmd: "dnf update -y"
+    requirements-cmd: "subscription-manager register --org=<ORG> --activationkey='<ACTIVATION_KEY>' ;dnf group install 'Development Tools';dnf install --allowerasing -y git vim clang gcc gcc-c++ curl wget python3 python3-pip python3-devel ninja-build glib2-devel flex bison xz bzip2 wget; subscription-manager unregister; subscription-manager clean"    
+    depends:
+      - cmake
+      - qemu
 
 qemu:
   url: https://download.qemu.org/qemu-<version>.tar.xz

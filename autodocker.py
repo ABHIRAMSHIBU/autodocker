@@ -190,21 +190,39 @@ class PrintManager:
             self.printer_thread.join(timeout=1.0)
 
 class ProgressManager:
+    STAGES = {
+        'dockerfile': 'Creating Dockerfile',
+        'build': 'Building Image',
+        'run': 'Starting Container',
+        'test': 'Running Tests',
+        'cleanup': 'Cleanup'
+    }
+    
     def __init__(self, total_containers):
+        self.total_containers = total_containers
+        self.total_steps = total_containers * len(self.STAGES)
         self.progress_bar = tqdm(
-            total=total_containers,
-            desc="Containers Progress",
-            unit="container",
+            total=self.total_steps,
+            desc="Overall Progress",
+            unit="step",
             position=0,
             leave=True,
             dynamic_ncols=True,
-            bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]'
+            bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] - {postfix}',
         )
+        self.current_stage = {}  # container_name -> set of completed stages
         self.lock = Lock()
     
-    def update(self):
+    def update_stage(self, container_name, stage):
+        """Update progress with new stage"""
         with self.lock:
-            self.progress_bar.update(1)
+            if container_name not in self.current_stage:
+                self.current_stage[container_name] = set()
+            
+            if stage in self.STAGES and stage not in self.current_stage[container_name]:
+                self.progress_bar.set_postfix_str(f"Container: {container_name} - Stage: {self.STAGES[stage]}")
+                self.progress_bar.update(1)
+                self.current_stage[container_name].add(stage)
     
     def clear(self):
         """Clear the progress bar"""
@@ -219,8 +237,34 @@ class ProgressManager:
     def close(self):
         self.progress_bar.close()
 
+def write_failed_containers(status, print_manager):
+    """Write failed container information to a file"""
+    failed_containers = {
+        container: {
+            'status': info['status'],
+            'image': info.get('image_name', 'unknown'),
+            'debug_command': info.get('debug_command', '')
+        }
+        for container, info in status.items()
+        if info['status'] != 'success'
+    }
+    
+    if failed_containers:
+        with open('failed_containers.txt', 'w') as f:
+            f.write("Failed Containers Information:\n")
+            f.write("============================\n\n")
+            for container, info in failed_containers.items():
+                f.write(f"Container: {container}\n")
+                f.write(f"Status: {info['status']}\n")
+                f.write(f"Image: {info['image']}\n")
+                f.write(f"Debug Command: {info['debug_command']}\n")
+                f.write("-" * 50 + "\n\n")
+        
+        print_manager.print(f"\nFailed containers information written to failed_containers.txt")
+        print_manager.print("\nTo debug a failed container, use the debug command provided in failed_containers.txt")
+
 def docker_worker(dockerfile_path, image_name, container_name, status, status_lock, 
-                 print_manager, project_info, progress_manager, debug=False, verbose=False):
+                 print_manager, project_info, progress_manager, debug=False, verbose=False, keepfailed=False):
     """Worker function to handle Docker build and run operations"""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -230,50 +274,80 @@ def docker_worker(dockerfile_path, image_name, container_name, status, status_lo
         # Build Docker image from parent directory to include scripts
         build_log = os.path.join(log_dir, f'build_{timestamp}.log')
         build_cmd = f"docker buildx build -f {dockerfile_path} -t {image_name} ."
+        
+        progress_manager.update_stage(container_name, 'build')
         build_code = run_command(build_cmd, build_log, f"{container_name}:build", verbose)
         
         if build_code != 0:
+            debug_cmd = f"docker run {'--rm' if not keepfailed else ''} -it --entrypoint /bin/bash {image_name}"
             with status_lock:
                 status[container_name] = {
                     'status': 'build_failed',
                     'code': build_code,
-                    'log': build_log
+                    'log': build_log,
+                    'image_name': image_name,
+                    'debug_command': debug_cmd
                 }
             print_manager.print(f"\nDocker build failed for {container_name}. Check logs at {build_log}")
+            print_manager.print(f"To debug the build environment, run: {debug_cmd}")
+            # Mark remaining stages as complete even in case of failure
+            for stage in ['run', 'test', 'cleanup']:
+                progress_manager.update_stage(container_name, stage)
             return
 
         # Run container with docker-opts from project config
+        progress_manager.update_stage(container_name, 'run')
         run_log = os.path.join(log_dir, f'run_{timestamp}.log')
         docker_opts = project_info.get('docker-opts', '')
         run_cmd = f"docker run {docker_opts} --name {container_name} --replace {image_name}"
+        
+        progress_manager.update_stage(container_name, 'test')
         exit_code = run_command(run_cmd, run_log, f"{container_name}:run", verbose)
         
+        debug_cmd = f"docker run {'--rm' if not keepfailed else ''} -it --entrypoint /bin/bash {docker_opts} {image_name}"
         with status_lock:
             status[container_name] = {
                 'status': 'success' if exit_code == 0 else 'run_failed',
                 'code': exit_code,
                 'build_log': build_log,
-                'run_log': run_log
+                'run_log': run_log,
+                'image_name': image_name,
+                'debug_command': debug_cmd
             }
         
-        message = (f"\nContainer {container_name} failed. Check logs at {run_log}" 
-                  if exit_code != 0 else 
-                  f"\nContainer {container_name} succeeded. Logs at {run_log}")
+        if exit_code != 0:
+            message = f"\nContainer {container_name} failed. Check logs at {run_log}"
+            message += f"\nTo debug the container, run: {debug_cmd}"
+        else:
+            message = f"\nContainer {container_name} succeeded. Logs at {run_log}"
         print_manager.print(message)
         
         # Launch debug shell if test failed and debug mode is enabled
         if exit_code != 0 and debug:
             print_manager.print(f"\nLaunching debug shell in container {container_name}...")
-            debug_cmd = f"docker run -it --entrypoint /bin/bash {docker_opts} {image_name}"
             subprocess.run(debug_cmd, shell=True)
         
-        # Cleanup
+        # Cleanup based on success and keepfailed flag
+        progress_manager.update_stage(container_name, 'cleanup')
         cleanup_log = os.path.join(log_dir, f'cleanup_{timestamp}.log')
-        run_command(f"docker rm {container_name}", cleanup_log)
+        if exit_code == 0 or not keepfailed:
+            run_command(f"docker rm {container_name}", cleanup_log)
     
-    finally:
-        # Update progress bar regardless of success/failure
-        progress_manager.update()
+    except Exception as e:
+        debug_cmd = f"docker run {'--rm' if not keepfailed else ''} -it --entrypoint /bin/bash {docker_opts} {image_name}"
+        print_manager.print(f"\nError processing container {container_name}: {str(e)}")
+        print_manager.print(f"To debug the container, run: {debug_cmd}")
+        # Mark remaining stages as complete in case of error
+        for stage in ProgressManager.STAGES:
+            progress_manager.update_stage(container_name, stage)
+        with status_lock:
+            status[container_name] = {
+                'status': 'error',
+                'error': str(e),
+                'image_name': image_name,
+                'debug_command': debug_cmd
+            }
+        raise
 
 def print_failure_logs(status, print_manager):
     """Print logs for failed builds/runs"""
@@ -297,15 +371,11 @@ def sanitize_tag(tag):
     tag = str(tag)
     return tag.replace('/', '-').replace(':', '-')
 
-def platform_worker(platform, config, status, status_lock, print_manager, progress_manager, debug=False, verbose=False):
+def platform_worker(platform, config, status, status_lock, print_manager, progress_manager, debug=False, verbose=False, keepfailed=False):
     """Worker function to handle all containers for a single platform"""
     cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
     
     for cmake_version in cmake_versions:
-        dockerfile_content = create_dockerfile(platform, config['cmake'], 
-                                            config['project'], config['qemu'],
-                                            cmake_version)
-        
         version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
         platform_tag = sanitize_tag(platform['version'] if platform['version'] != 'latest' else platform['image'])
         
@@ -314,13 +384,17 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
         container_name = f"{config['project']['name'].lower().replace(' ', '-')}-{platform['name'].lower().replace(' ', '-')}{version_suffix}"
         
         # Write Dockerfile
+        progress_manager.update_stage(container_name, 'dockerfile')
+        dockerfile_content = create_dockerfile(platform, config['cmake'], 
+                                            config['project'], config['qemu'],
+                                            cmake_version)
         with open(dockerfile_path, 'w') as f:
             f.write(dockerfile_content)
         
         # Process this platform's container
         docker_worker(dockerfile_path, image_name, container_name, 
                      status, status_lock, print_manager, config['project'],
-                     progress_manager, debug, verbose)
+                     progress_manager, debug, verbose, keepfailed)
 
 def main():
     # Parse command line arguments
@@ -329,6 +403,7 @@ def main():
     parser.add_argument('--verbose', action='store_true', help='Print build and run output in real-time')
     parser.add_argument('--threading-level', choices=['platform', 'docker'], default='platform',
                        help='Control threading level: "platform" (one thread per platform) or "docker" (one thread per docker operation)')
+    parser.add_argument('--keepfailed', action='store_true', help='Keep failed containers for debugging (default: remove all containers)')
     args = parser.parse_args()
 
     status = {}
@@ -362,7 +437,7 @@ def main():
                     
                 thread = Thread(target=platform_worker,
                               args=(platform, config, status, status_lock, print_manager, 
-                                   progress_manager, args.debug, args.verbose))
+                                   progress_manager, args.debug, args.verbose, args.keepfailed))
                 threads.append(thread)
                 thread.start()
         else:
@@ -393,7 +468,7 @@ def main():
                     thread = Thread(target=docker_worker,
                                   args=(dockerfile_path, image_name, container_name, 
                                        status, status_lock, print_manager, config['project'],
-                                       progress_manager, args.debug, args.verbose))
+                                       progress_manager, args.debug, args.verbose, args.keepfailed))
                     threads.append(thread)
                     thread.start()
         
@@ -410,12 +485,17 @@ def main():
         print_manager.print("\nResults:")
         print_manager.pprint(status)
         
+        # Write failed containers information
+        write_failed_containers(status, print_manager)
+        
         # Print logs for failures
         print_failure_logs(status, print_manager)
         
         # Determine overall status
         failed = any(result['status'] != 'success' for result in status.values())
         print_manager.print("\nOverall status: " + ("Failed" if failed else "Success"))
+        print_manager.print(f"Failed containers: {failed}")
+        print_manager.print(f"Please see failed_containers.txt for more information")
         
         # Stop the print manager
         print_manager.stop()
