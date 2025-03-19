@@ -7,20 +7,35 @@ platforms:
   #   depends:
   #     - cmake
   #     - qemu
-  - name: Ubuntu 24.04
-    image: ubuntu
-    version: 24.04
+  # - name: Ubuntu 24.04
+  #   image: ubuntu
+  #   version: 24.04
+  #   update-cmd: "apt update; apt upgrade -y"
+  #   requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
+  #   depends:
+  #     - cmake
+  # - name: Ubuntu 24.10
+  #   image: ubuntu
+  #   version: "24.10"
+  #   update-cmd: "apt update; apt upgrade -y"
+  #   requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
+  #   depends:
+  #     - cmake
+  - name: Debian 12
+    image: debian
+    version: "12"
     update-cmd: "apt update; apt upgrade -y"
-    requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
+    requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user pkg-config libglib2.0-dev libpixman-1-dev libsdl2-dev libspice-server-dev libusb-1.0-0-dev libaio-dev libcap-dev libcap-ng-dev libattr1-dev libbrlapi-dev libbz2-dev libcap-ng-dev libcurl4-gnutls-dev libepoxy-dev libfdt-dev libgbm-dev libgmp-dev libgnutls28-dev libgtk-3-dev libibverbs-dev libjpeg62-turbo-dev libncurses5-dev libncursesw5-dev libnfs-dev libnuma-dev libpulse-dev librbd-dev librdmacm-dev libsasl2-dev libseccomp-dev libsnappy-dev libssh-dev libvde-dev libvdeplug-dev libvte-2.91-dev libxen-dev libzstd-dev valgrind xfslibs-dev flex bison"
     depends:
       - cmake
-  - name: Arch Linux
-    image: archlinux
-    version: latest
-    update-cmd: "pacman -Syu --noconfirm"
-    requirements-cmd: "pacman -Syu --noconfirm base-devel git vim clang gcc lsb-release curl wget python python-pip ninja qemu-user"
-    depends:
-      - cmake
+      - qemu
+  # - name: Arch Linux
+  #   image: archlinux
+  #   version: latest
+  #   update-cmd: "pacman -Syu --noconfirm"
+  #   requirements-cmd: "pacman -Syu --noconfirm base-devel git vim clang gcc lsb-release curl wget python python-pip ninja qemu-user"
+  #   depends:
+  #     - cmake
   # - name: RHEL 9
   #   image: redhat/ubi9
   #   version: latest

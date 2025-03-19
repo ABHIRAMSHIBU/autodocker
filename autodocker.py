@@ -92,7 +92,7 @@ def get_qemu_setup(platform, qemu_info):
     
     return f"""# Build and Install QEMU
 WORKDIR /tmp
-RUN wget {qemu_info['url'].replace('<version>', qemu_info['version'])}
+RUN wget -4 {qemu_info['url'].replace('<version>', qemu_info['version'])}
 RUN tar xf qemu-{qemu_info['version']}.tar.xz
 WORKDIR /tmp/qemu-{qemu_info['version']}
 RUN {qemu_info['configure-cmd']}
