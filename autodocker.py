@@ -12,11 +12,31 @@ from io import StringIO
 from tqdm import tqdm
 
 def read_yaml_config(file_path):
+    """
+    Read and parse a YAML configuration file.
+    
+    Args:
+        file_path (str): Path to the YAML configuration file
+    
+    Returns:
+        dict: Parsed YAML configuration
+    """
     with open(file_path, 'r') as file:
         return yaml.safe_load(file)
 
 def get_base_setup(platform):
-    """Generate base system setup commands"""
+    """
+    Generate base system setup commands for Dockerfile.
+    
+    Args:
+        platform (dict): Platform configuration containing:
+            - image (str): Base image name
+            - version (str): Image version
+            - update-cmd (str): System update command
+    
+    Returns:
+        str: Dockerfile commands for base system setup
+    """
     env_setup = 'ENV DEBIAN_FRONTEND=noninteractive' if platform['image'] == 'ubuntu' else ''
     return f"""FROM {platform['image']}:{platform['version']}
     
@@ -30,7 +50,18 @@ RUN {process_requirements_cmd(platform)}
 """
 
 def get_cmake_setup(platform, cmake_info, cmake_version):
-    """Generate CMake installation if needed"""
+    """
+    Generate CMake installation commands for Dockerfile.
+    
+    Args:
+        platform (dict): Platform configuration
+        cmake_info (dict): CMake configuration containing:
+            - url (str): Download URL template
+        cmake_version (str): CMake version to install
+    
+    Returns:
+        str: Dockerfile commands for CMake installation or empty string if not needed
+    """
     if 'cmake' not in platform.get('depends', []):
         return ""
     
@@ -41,7 +72,21 @@ RUN bash cmake-{cmake_version}-linux-x86_64.sh --skip-license --prefix=/usr/loca
 """
 
 def get_qemu_setup(platform, qemu_info):
-    """Generate QEMU build and installation if needed"""
+    """
+    Generate QEMU build and installation commands for Dockerfile.
+    
+    Args:
+        platform (dict): Platform configuration
+        qemu_info (dict): QEMU configuration containing:
+            - url (str): Download URL
+            - version (str): QEMU version
+            - configure-cmd (str): Configuration command
+            - build-cmd (str): Build command
+            - install-cmd (str): Installation command
+    
+    Returns:
+        str: Dockerfile commands for QEMU setup or empty string if not needed
+    """
     if 'qemu' not in platform.get('depends', []):
         return ""
     
@@ -56,7 +101,21 @@ RUN {qemu_info['install-cmd']}
 """
 
 def get_python_setup(platform, python_info):
-    """Generate Python build and installation if needed"""
+    """
+    Generate Python build and installation commands for Dockerfile.
+    
+    Args:
+        platform (dict): Platform configuration
+        python_info (dict): Python configuration containing:
+            - url (str): Download URL
+            - version (str): Python version
+            - configure-cmd (str): Configuration command
+            - build-cmd (str): Build command
+            - install-cmd (str): Installation command
+    
+    Returns:
+        str: Dockerfile commands for Python setup or empty string if not needed
+    """
     if 'python' not in platform.get('depends', []):
         return ""
     
@@ -71,7 +130,21 @@ RUN {python_info['install-cmd']}
 """
 
 def get_project_setup(project_info):
-    """Generate project build commands"""
+    """
+    Generate project build commands for Dockerfile.
+    
+    Args:
+        project_info (dict): Project configuration containing:
+            - git-url (str): Project repository URL
+            - branch (str): Git branch to checkout
+            - configure-cmd (str): Project configuration command
+            - build-cmd (str): Build command
+            - install-cmd (str): Installation command
+            - test-cmd (str): Test command
+    
+    Returns:
+        str: Dockerfile commands for project setup
+    """
     return f"""# Clone and build project
 WORKDIR /app
 RUN git clone {project_info['git-url']} .
@@ -83,7 +156,21 @@ CMD {project_info['test-cmd']}
 """
 
 def get_git_dependency_setup(dependency_info, dep_name):
-    """Generate git dependency build and installation commands"""
+    """
+    Generate git dependency build and installation commands for Dockerfile.
+    
+    Args:
+        dependency_info (dict): Dependency configuration containing:
+            - url (str): Git repository URL
+            - branch (str): Git branch
+            - configure-cmd (str): Configuration command
+            - build-cmd (str): Build command
+            - install-cmd (str): Installation command
+        dep_name (str): Name of the dependency
+    
+    Returns:
+        str: Dockerfile commands for dependency setup
+    """
     return f"""# Clone and build dependency {dep_name}
 RUN mkdir -p /tmp/{dep_name}
 WORKDIR /tmp/{dep_name}
@@ -95,7 +182,21 @@ RUN {dependency_info['install-cmd']}
 """
 
 def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info, cmake_version, dependencies=None):
-    """Combine all Dockerfile sections"""
+    """
+    Combine all Dockerfile sections into a complete Dockerfile.
+    
+    Args:
+        platform (dict): Platform configuration
+        cmake_info (dict): CMake configuration
+        project_info (dict): Project configuration
+        qemu_info (dict): QEMU configuration
+        python_info (dict): Python configuration
+        cmake_version (str): CMake version
+        dependencies (dict, optional): Additional dependencies configuration
+    
+    Returns:
+        str: Complete Dockerfile content
+    """
     sections = [
         get_base_setup(platform),
     ]
@@ -122,11 +223,31 @@ def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info
     return "\n".join(sections)
 
 def prefix_output(line, prefix):
-    """Add prefix to each line of output"""
+    """
+    Add prefix to each line of output.
+    
+    Args:
+        line (str): Line of output
+        prefix (str): Prefix to add
+    
+    Returns:
+        str: Prefixed output line
+    """
     return f"[{prefix}] {line}"
 
 def run_command(cmd, logfile, container_name="", verbose=False):
-    """Run a command and log its output"""
+    """
+    Run a shell command and log its output.
+    
+    Args:
+        cmd (str): Command to execute
+        logfile (str): Path to log file
+        container_name (str, optional): Container name for output prefixing
+        verbose (bool, optional): Enable verbose output
+    
+    Returns:
+        int: Command exit code
+    """
     print_manager = PrintManager()
     with open(logfile, 'w', buffering=1) as f:
         process = subprocess.Popen(
@@ -152,6 +273,12 @@ def run_command(cmd, logfile, container_name="", verbose=False):
         return process.returncode
 
 class PrintManager:
+    """
+    Thread-safe print manager for coordinated console output.
+    
+    Handles synchronized printing with progress bar management
+    and provides various printing utilities.
+    """
     _instance = None
     
     def __new__(cls):
@@ -234,6 +361,12 @@ class PrintManager:
             self.printer_thread.join(timeout=1.0)
 
 class ProgressManager:
+    """
+    Manages progress bars for multi-container builds.
+    
+    Tracks progress across different stages of container
+    building and testing for multiple containers.
+    """
     STAGES = {
         'dockerfile': 'Creating Dockerfile',
         'build': 'Building Image',
@@ -282,7 +415,13 @@ class ProgressManager:
         self.progress_bar.close()
 
 def write_failed_containers(status, print_manager):
-    """Write failed container information to a file"""
+    """
+    Write information about failed containers to a file.
+    
+    Args:
+        status (dict): Container status dictionary
+        print_manager (PrintManager): Print manager instance
+    """
     failed_containers = {
         container: {
             'status': info['status'],
@@ -410,13 +549,34 @@ def print_failure_logs(status, print_manager):
                 print_manager.print_file(result['run_log'])
 
 def sanitize_tag(tag):
-    """Sanitize tag name to be compatible with Docker/Podman"""
+    """
+    Sanitize tag name to be compatible with Docker/Podman.
+    
+    Args:
+        tag (str|int): Tag to sanitize
+    
+    Returns:
+        str: Sanitized tag string
+    """
     # Convert tag to string if it's a number
     tag = str(tag)
     return tag.replace('/', '-').replace(':', '-')
 
 def platform_worker(platform, config, status, status_lock, print_manager, progress_manager, debug=False, verbose=False, keepfailed=False):
-    """Worker function to handle all containers for a single platform"""
+    """
+    Worker function to handle all containers for a single platform.
+    
+    Args:
+        platform (dict): Platform configuration
+        config (dict): Complete configuration
+        status (dict): Shared status dictionary
+        status_lock (Lock): Thread lock for status updates
+        print_manager (PrintManager): Print manager instance
+        progress_manager (ProgressManager): Progress manager instance
+        debug (bool, optional): Enable debug mode
+        verbose (bool, optional): Enable verbose output
+        keepfailed (bool, optional): Keep failed containers
+    """
     cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
     
     # Collect all dependencies from config
@@ -452,6 +612,12 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
                      progress_manager, debug, verbose, keepfailed)
 
 def parse_args():
+    """
+    Parse command line arguments.
+    
+    Returns:
+        argparse.Namespace: Parsed command line arguments
+    """
     parser = argparse.ArgumentParser(description='Generate Dockerfile from YAML configuration')
     parser.add_argument('-f', '--file', 
                         default='autodocker.yaml',
@@ -475,6 +641,16 @@ def parse_args():
     return parser.parse_args()
 
 def main():
+    """
+    Main function that orchestrates the Docker build process.
+    
+    Handles:
+    - Configuration loading
+    - Platform processing
+    - Threading management
+    - Progress tracking
+    - Result reporting
+    """
     args = parse_args()
     
     try:
