@@ -82,15 +82,43 @@ RUN {project_info['install-cmd']}
 CMD {project_info['test-cmd']}
 """
 
-def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info, cmake_version):
+def get_git_dependency_setup(dependency_info, dep_name):
+    """Generate git dependency build and installation commands"""
+    return f"""# Clone and build dependency {dep_name}
+RUN mkdir -p /tmp/{dep_name}
+WORKDIR /tmp/{dep_name}
+RUN git clone {dependency_info['url']} .
+RUN git checkout {dependency_info['branch']}
+RUN {dependency_info['configure-cmd']}
+RUN {dependency_info['build-cmd']}
+RUN {dependency_info['install-cmd']}
+"""
+
+def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info, cmake_version, dependencies=None):
     """Combine all Dockerfile sections"""
     sections = [
         get_base_setup(platform),
-        get_python_setup(platform, python_info),
-        get_qemu_setup(platform, qemu_info),
-        get_cmake_setup(platform, cmake_info, cmake_version),
-        get_project_setup(project_info)
     ]
+    
+    # Only add Python setup if it's a dependency
+    if 'python' in platform.get('depends', []) and python_info:
+        sections.append(get_python_setup(platform, python_info))
+    
+    # Only add QEMU setup if it's a dependency
+    if 'qemu' in platform.get('depends', []) and qemu_info:
+        sections.append(get_qemu_setup(platform, qemu_info))
+    
+    # Only add CMake setup if it's a dependency
+    if 'cmake' in platform.get('depends', []) and cmake_info:
+        sections.append(get_cmake_setup(platform, cmake_info, cmake_version))
+    
+    # Add any git-based dependencies
+    if dependencies:
+        for dep_name in platform.get('depends', []):
+            if dep_name in dependencies and dependencies[dep_name].get('type') == 'git':
+                sections.append(get_git_dependency_setup(dependencies[dep_name], dep_name))
+    
+    sections.append(get_project_setup(project_info))
     return "\n".join(sections)
 
 def prefix_output(line, prefix):
@@ -391,6 +419,13 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
     """Worker function to handle all containers for a single platform"""
     cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
     
+    # Collect all dependencies from config
+    dependencies = {
+        'python': config.get('python'),
+        'qemu': config.get('qemu'),
+        'aocl-utils': config.get('aocl-utils')
+    }
+    
     for cmake_version in cmake_versions:
         version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
         platform_tag = sanitize_tag(platform['version'] if platform['version'] != 'latest' else platform['image'])
@@ -401,9 +436,13 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
         
         # Write Dockerfile
         progress_manager.update_stage(container_name, 'dockerfile')
-        dockerfile_content = create_dockerfile(platform, config['cmake'], 
-                                            config['project'], config['qemu'],
-                                            config['python'], cmake_version)
+        dockerfile_content = create_dockerfile(platform, 
+                                            config.get('cmake'),
+                                            config['project'],
+                                            config.get('qemu'),
+                                            config.get('python'),
+                                            cmake_version,
+                                            dependencies)
         with open(dockerfile_path, 'w') as f:
             f.write(dockerfile_content)
         
@@ -412,21 +451,46 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
                      status, status_lock, print_manager, config['project'],
                      progress_manager, debug, verbose, keepfailed)
 
-def main():
-    # Parse command line arguments
-    parser = argparse.ArgumentParser(description='Build and test in Docker containers')
-    parser.add_argument('--debug', action='store_true', help='Launch a shell in the container if tests fail')
-    parser.add_argument('--verbose', action='store_true', help='Print build and run output in real-time')
-    parser.add_argument('--threading-level', choices=['platform', 'docker'], default='platform',
-                       help='Control threading level: "platform" (one thread per platform) or "docker" (one thread per docker operation)')
-    parser.add_argument('--keepfailed', action='store_true', help='Keep failed containers for debugging (default: remove all containers)')
-    args = parser.parse_args()
+def parse_args():
+    parser = argparse.ArgumentParser(description='Generate Dockerfile from YAML configuration')
+    parser.add_argument('-f', '--file', 
+                        default='autodocker.yaml',
+                        help='Path to YAML configuration file (default: autodocker.yaml)')
+    parser.add_argument('-d', '--debug',
+                        action='store_true',
+                        help='Enable debug mode - launches shell on test failure')
+    parser.add_argument('-v', '--verbose',
+                        action='store_true',
+                        help='Enable verbose output')
+    parser.add_argument('-k', '--keepfailed',
+                        action='store_true',
+                        help='Keep failed containers and images')
+    parser.add_argument('-t', '--threading-level',
+                        choices=['platform', 'docker'],
+                        default='docker',
+                        help='Threading level (platform or docker)')
+    parser.add_argument('--print-logs',
+                        action='store_true',
+                        help='Print build and run logs for failed containers')
+    return parser.parse_args()
 
+def main():
+    args = parse_args()
+    
+    try:
+        with open(args.file, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        print(f"Error: Configuration file '{args.file}' not found")
+        sys.exit(1)
+    except yaml.YAMLError as e:
+        print(f"Error parsing YAML file: {e}")
+        sys.exit(1)
+        
     status = {}
     status_lock = Lock()
     print_manager = PrintManager()
     threads = []
-    config = read_yaml_config('aocl-utils.yaml')
     
     # Calculate total number of containers
     total_containers = sum(
@@ -442,6 +506,13 @@ def main():
     # Create necessary directories
     for dir in ['build', 'logs']:
         os.makedirs(dir, exist_ok=True)
+    
+    # Collect all dependencies from config
+    dependencies = {
+        'python': config.get('python'),
+        'qemu': config.get('qemu'),
+        'aocl-utils': config.get('aocl-utils')
+    }
     
     try:
         if args.threading_level == 'platform':
@@ -465,9 +536,10 @@ def main():
                 
                 cmake_versions = config['cmake']['versions'] if 'cmake' in platform.get('depends', []) else [None]
                 for cmake_version in cmake_versions:
-                    dockerfile_content = create_dockerfile(platform, config['cmake'], 
-                                                        config['project'], config['qemu'],
-                                                        cmake_version)
+                    dockerfile_content = create_dockerfile(platform, config.get('cmake'), 
+                                                        config['project'], config.get('qemu'),
+                                                        config.get('python'), cmake_version,
+                                                        dependencies)
                     
                     version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
                     platform_tag = sanitize_tag(platform['version'] if platform['version'] != 'latest' else platform['image'])
