@@ -181,7 +181,36 @@ RUN {dependency_info['build-cmd']}
 RUN {dependency_info['install-cmd']}
 """
 
-def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info, cmake_version, dependencies=None):
+def get_ssh_setup(ssh_config):
+    """Generate SSH key setup commands for Dockerfile."""
+    if not ssh_config.get('enabled', False):
+        return []
+
+    commands = []
+    
+    # Create .ssh directory with correct permissions
+    commands.append("RUN mkdir -p /root/.ssh && chmod 700 /root/.ssh")
+
+    # Get the SSH directory path from config
+    ssh_dir = ssh_config.get('path', 'ssh')
+
+    # Copy SSH keys and config
+    for key in ssh_config.get('keys', []):
+        key_name = os.path.basename(key)
+        commands.append(f"COPY {ssh_dir}/{key_name} /root/.ssh/{key_name}")
+
+    # Set proper permissions for all files
+    commands.append('RUN bash -c "chmod 600 /root/.ssh/*"')
+    
+    # Configure SSH to accept new host keys automatically for github.com
+    commands.append('RUN mkdir -p /etc/ssh/ && echo "StrictHostKeyChecking accept-new" >> /etc/ssh/ssh_config')
+    
+    # Add debug command to verify SSH setup
+    commands.append('RUN bash -c "ls -la /root/.ssh/"')
+
+    return commands
+
+def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info, cmake_version, dependencies=None, ssh_config=None):
     """
     Combine all Dockerfile sections into a complete Dockerfile.
     
@@ -193,6 +222,7 @@ def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info
         python_info (dict): Python configuration
         cmake_version (str): CMake version
         dependencies (dict, optional): Additional dependencies configuration
+        ssh_config (dict, optional): SSH configuration
     
     Returns:
         str: Complete Dockerfile content
@@ -218,6 +248,10 @@ def create_dockerfile(platform, cmake_info, project_info, qemu_info, python_info
         for dep_name in platform.get('depends', []):
             if dep_name in dependencies and dependencies[dep_name].get('type') == 'git':
                 sections.append(get_git_dependency_setup(dependencies[dep_name], dep_name))
+    
+    # Add SSH setup if configured
+    if ssh_config and ssh_config.get('enabled', False):
+        sections.append("\n".join(get_ssh_setup(ssh_config)))
     
     sections.append(get_project_setup(project_info))
     return "\n".join(sections)
@@ -447,7 +481,8 @@ def write_failed_containers(status, print_manager):
         print_manager.print("\nTo debug a failed container, use the debug command provided in failed_containers.txt")
 
 def docker_worker(dockerfile_path, image_name, container_name, status, status_lock, 
-                 print_manager, project_info, progress_manager, debug=False, verbose=False, keepfailed=False):
+                 print_manager, project_info, progress_manager, debug=False, verbose=False, 
+                 keepfailed=False, ssh_config=None):
     """Worker function to handle Docker build and run operations"""
     try:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -482,6 +517,12 @@ def docker_worker(dockerfile_path, image_name, container_name, status, status_lo
         progress_manager.update_stage(container_name, 'run')
         run_log = os.path.join(log_dir, f'run_{timestamp}.log')
         docker_opts = project_info.get('docker-opts', '')
+        
+        # Add SSH volume mount if configured for volume mounting
+        if ssh_config and ssh_config.get('enabled', False) and ssh_config.get('mount-type') == 'volume':
+            ssh_path = os.path.expanduser(ssh_config.get('path', '~/.ssh'))
+            docker_opts += f" -v {ssh_path}:/root/.ssh:ro"
+        
         run_cmd = f"docker run {docker_opts} --name {container_name} --replace {image_name}"
         
         progress_manager.update_stage(container_name, 'test')
@@ -602,7 +643,8 @@ def platform_worker(platform, config, status, status_lock, print_manager, progre
                                             config.get('qemu'),
                                             config.get('python'),
                                             cmake_version,
-                                            dependencies)
+                                            dependencies,
+                                            config.get('ssh-keys'))
         with open(dockerfile_path, 'w') as f:
             f.write(dockerfile_content)
         
@@ -715,7 +757,7 @@ def main():
                     dockerfile_content = create_dockerfile(platform, config.get('cmake'), 
                                                         config['project'], config.get('qemu'),
                                                         config.get('python'), cmake_version,
-                                                        dependencies)
+                                                        dependencies, config.get('ssh-keys'))
                     
                     version_suffix = f"-cmake-{cmake_version}" if cmake_version else ""
                     platform_tag = sanitize_tag(platform['version'] if platform['version'] != 'latest' else platform['image'])

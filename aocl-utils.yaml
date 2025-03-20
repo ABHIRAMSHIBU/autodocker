@@ -14,21 +14,21 @@ platforms:
   #   requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
   #   depends:
   #     - cmake
-  # - name: Ubuntu 24.10
-  #   image: ubuntu
-  #   version: "24.10"
-  #   update-cmd: "apt update; apt upgrade -y"
-  #   requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
-  #   depends:
-  #     - cmake
-  - name: Debian 12
-    image: debian
-    version: "12"
+  - name: Ubuntu 24.10
+    image: ubuntu
+    version: "24.10"
     update-cmd: "apt update; apt upgrade -y"
-    requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user pkg-config libglib2.0-dev libpixman-1-dev libsdl2-dev libspice-server-dev libusb-1.0-0-dev libaio-dev libcap-dev libcap-ng-dev libattr1-dev libbrlapi-dev libbz2-dev libcap-ng-dev libcurl4-gnutls-dev libepoxy-dev libfdt-dev libgbm-dev libgmp-dev libgnutls28-dev libgtk-3-dev libibverbs-dev libjpeg62-turbo-dev libncurses5-dev libncursesw5-dev libnfs-dev libnuma-dev libpulse-dev librbd-dev librdmacm-dev libsasl2-dev libseccomp-dev libsnappy-dev libssh-dev libvde-dev libvdeplug-dev libvte-2.91-dev libxen-dev libzstd-dev valgrind xfslibs-dev flex bison"
+    requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
     depends:
       - cmake
-      - qemu
+  # - name: Debian 12
+  #   image: debian
+  #   version: "12"
+  #   update-cmd: "apt update; apt upgrade -y"
+  #   requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build           pkg-config libglib2.0-dev libpixman-1-dev libsdl2-dev                     libusb-1.0-0-dev libaio-dev libcap-dev libcap-ng-dev libattr1-dev libbrlapi-dev libbz2-dev libcap-ng-dev libcurl4-gnutls-dev libepoxy-dev libfdt-dev libgbm-dev libgmp-dev libgnutls28-dev libgtk-3-dev libibverbs-dev libjpeg62-turbo-dev libncurses5-dev libncursesw5-dev libnfs-dev libnuma-dev libpulse-dev librbd-dev librdmacm-dev libsasl2-dev libseccomp-dev libsnappy-dev libssh-dev libvde-dev libvdeplug-dev libvte-2.91-dev libxen-dev libzstd-dev valgrind xfslibs-dev flex bison"
+  #   depends:
+  #     - cmake
+  #     - qemu
   # - name: Arch Linux
   #   image: archlinux
   #   version: latest
@@ -53,6 +53,15 @@ platforms:
   #     - cmake
   #     - python
   #     - qemu
+
+ssh-keys:
+  enabled: true
+  path: "ssh"
+  keys:
+    - gitlab
+    - gitlab.pub
+    - config
+  mount-type: "copy"
 
 qemu:
   url: https://download.qemu.org/qemu-<version>.tar.xz
@@ -80,7 +89,8 @@ python:
 
 project:
    name: AOCL Utilities
-   git-url: "https://github.com/AMD/aocl-utils.git"
+   git-url: "git@github.com:AMD/aocl-utils.git"
+  #  git-url: "https://github.com/AMD/aocl-utils.git"
    branch : "dev"
    configure-cmd: "cmake -S . -B build -DAU_BUILD_TESTS=ON -G Ninja"
    build-cmd: "cmake --build build"
