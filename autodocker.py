@@ -6,10 +6,132 @@ import subprocess
 from datetime import datetime
 import sys
 import argparse
-from queue import Queue, Empty
 from platform_utils import can_build_platform, process_requirements_cmd
-from io import StringIO
 from tqdm import tqdm
+
+class ProgressManager:
+    """
+    Manages progress bar for tracking container builds.
+    """
+    def __init__(self, total):
+        """
+        Initialize progress manager.
+        
+        Args:
+            total (int): Total number of containers to build
+        """
+        self.progress = tqdm(total=total, desc="Building containers", unit="container")
+        self.stages = {}
+        self.stage_lock = Lock()
+    
+    def update_stage(self, container, stage):
+        """
+        Update stage for a container.
+        
+        Args:
+            container (str): Container name
+            stage (str): Current stage
+        """
+        with self.stage_lock:
+            self.stages[container] = stage
+            desc = f"Building containers ({', '.join(f'{k}: {v}' for k, v in self.stages.items())})"
+            self.progress.set_description(desc)
+    
+    def increment(self):
+        """Increment progress counter."""
+        self.progress.update(1)
+    
+    def clear(self):
+        """Clear progress bar."""
+        self.progress.clear()
+    
+    def refresh(self):
+        """Refresh progress bar."""
+        self.progress.refresh()
+    
+    def close(self):
+        """Close progress bar."""
+        self.progress.close()
+
+class PrintManager:
+    """
+    Manages console output with optional progress bar integration.
+    """
+    def __init__(self, progress_manager=None):
+        """
+        Initialize print manager.
+        
+        Args:
+            progress_manager (ProgressManager): Progress manager for tracking
+        """
+        self.progress_manager = progress_manager
+        
+    def set_progress_manager(self, progress_manager):
+        """
+        Set progress manager.
+        
+        Args:
+            progress_manager (ProgressManager): Progress manager for tracking
+        """
+        self.progress_manager = progress_manager
+    
+    def print(self, message):
+        """
+        Print a message, handling progress bar if present.
+        
+        Args:
+            message (str): Message to print
+        """
+        if self.progress_manager:
+            self.progress_manager.clear()
+        print(message)
+        if self.progress_manager:
+            self.progress_manager.refresh()
+    
+    def pprint(self, obj):
+        """
+        Pretty print an object.
+        
+        Args:
+            obj: Object to print
+        """
+        if self.progress_manager:
+            self.progress_manager.clear()
+        pprint(obj)
+        if self.progress_manager:
+            self.progress_manager.refresh()
+    
+    def print_file(self, file_path):
+        """
+        Print contents of a file.
+        
+        Args:
+            file_path (str): Path to file
+        """
+        try:
+            with open(file_path, 'r') as f:
+                if self.progress_manager:
+                    self.progress_manager.clear()
+                print(f.read())
+                if self.progress_manager:
+                    self.progress_manager.refresh()
+        except Exception as e:
+            self.print(f"Error reading file {file_path}: {str(e)}")
+    
+    def separator(self, char='-', length=80):
+        """
+        Print a separator line.
+        
+        Args:
+            char (str): Character to use for separator
+            length (int): Length of separator
+        """
+        self.print(char * length)
+    
+    def stop(self):
+        """Stop the progress manager if it exists."""
+        if self.progress_manager:
+            self.progress_manager.close()
 
 class AutoDockerConfig:
     """
@@ -107,19 +229,6 @@ class AutoDockerConfig:
             list: List of CMake versions or [None] if CMake not required
         """
         return self.cmake_versions if 'cmake' in platform.get('depends', []) else [None]
-
-def read_yaml_config(file_path):
-    """
-    Read and parse a YAML configuration file.
-    
-    Args:
-        file_path (str): Path to the YAML configuration file
-    
-    Returns:
-        dict: Parsed YAML configuration
-    """
-    with open(file_path, 'r') as file:
-        return yaml.safe_load(file)
 
 def get_base_setup(platform):
     """
@@ -427,237 +536,21 @@ def create_dockerfile(container_info, ssh_config=None):
     
     return dockerfile_path
 
-def prefix_output(line, prefix):
-    """
-    Add prefix to each line of output.
-    
-    Args:
-        line (str): Line of output
-        prefix (str): Prefix to add
-    
-    Returns:
-        str: Prefixed output line
-    """
-    return f"[{prefix}] {line}"
-
-def run_command(cmd, logfile, container_name="", verbose=False):
-    """
-    Run a shell command and log its output.
-    
-    Args:
-        cmd (str): Command to execute
-        logfile (str): Path to log file
-        container_name (str, optional): Container name for output prefixing
-        verbose (bool, optional): Enable verbose output
-    
-    Returns:
-        int: Command exit code
-    """
-    print_manager = PrintManager()
-    with open(logfile, 'w', buffering=1) as f:
-        process = subprocess.Popen(
-            cmd,
-            shell=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1
-        )
-        
-        for line in process.stdout:
-            # Write original line to log file
-            f.write(line)
-            f.flush()
+def print_failure_logs(status, print_manager):
+    """Print logs for failed builds/runs"""
+    for container, result in status.items():
+        if result['status'] != 'success':
+            print_manager.print(f"\nFailure detected for {container}:")
+            print_manager.print(f"Status: {result['status']}")
+            print_manager.print(f"Exit code: {result['code']}")
             
-            if verbose:
-                # Add prefix for console output
-                prefixed_line = prefix_output(line.rstrip(), container_name)
-                print_manager.direct_print(prefixed_line)
-        
-        process.wait()
-        return process.returncode
-
-class PrintManager:
-    """
-    Thread-safe print manager for coordinated console output.
-    
-    Handles synchronized printing with progress bar management
-    and provides various printing utilities.
-    """
-    _instance = None
-    
-    def __new__(cls):
-        if cls._instance is None:
-            cls._instance = super(PrintManager, cls).__new__(cls)
-            cls._instance._initialize()
-        return cls._instance
-    
-    def _initialize(self):
-        """Initialize the singleton instance"""
-        self.print_queue = Queue()
-        self.is_running = True
-        self.progress_manager = None
-        self.printer_thread = Thread(target=self._printer_worker)
-        self.printer_thread.daemon = True
-        self.printer_thread.start()
-        self.lock = Lock()
-
-    def set_progress_manager(self, progress_manager):
-        """Set the progress manager instance"""
-        self.progress_manager = progress_manager
-
-    def _printer_worker(self):
-        while self.is_running or not self.print_queue.empty():
-            try:
-                message = self.print_queue.get(timeout=0.1)
-                with self.lock:
-                    if self.progress_manager:
-                        # Clear progress bar, print message, restore progress bar
-                        self.progress_manager.clear()
-                        sys.stdout.write(message + '\n')
-                        sys.stdout.flush()
-                        self.progress_manager.refresh()
-                    else:
-                        sys.stdout.write(message + '\n')
-                        sys.stdout.flush()
-                self.print_queue.task_done()
-            except Empty:
-                continue
-            except Exception as e:
-                sys.stderr.write(f"Printer thread error: {e}\n")
-                sys.stderr.flush()
-
-    def print(self, message):
-        """Print a message"""
-        self.print_queue.put(str(message))
-
-    def direct_print(self, message):
-        """Immediately print a message with progress bar handling"""
-        with self.lock:
-            if self.progress_manager:
-                self.progress_manager.clear()
-                sys.stdout.write(message + '\n')
-                sys.stdout.flush()
-                self.progress_manager.refresh()
-            else:
-                sys.stdout.write(message + '\n')
-                sys.stdout.flush()
-
-    def separator(self):
-        """Print a separator line"""
-        self.print("\n" + "-" * 80)
-
-    def pprint(self, obj):
-        """Pretty print an object"""
-        import pprint
-        self.print(pprint.pformat(obj))
-
-    def print_file(self, filepath):
-        """Print contents of a file"""
-        try:
-            with open(filepath, 'r') as f:
-                self.print(f.read())
-        except Exception as e:
-            self.print(f"Error reading file {filepath}: {e}")
-
-    def stop(self):
-        self.is_running = False
-        if self.printer_thread.is_alive():
-            self.printer_thread.join(timeout=1.0)
-
-class ProgressManager:
-    """
-    Manages progress tracking for Docker operations.
-    """
-    STAGES = ['dockerfile', 'build', 'run', 'test', 'cleanup']
-    
-    def __init__(self, total_containers):
-        """
-        Initialize progress manager.
-        
-        Args:
-            total_containers (int): Total number of containers to process
-        """
-        self.total_containers = total_containers
-        self.current = 0
-        self.progress_bar = tqdm(
-            total=total_containers,
-            desc="Processing containers",
-            unit="container",
-            position=0,
-            leave=True,
-            dynamic_ncols=True,
-            bar_format='{desc}: {percentage:3.0f}%|{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}] - {postfix}'
-        )
-        self.container_stages = {}
-        self.lock = Lock()
-    
-    def update_stage(self, container_name, stage):
-        """
-        Update the stage of a container.
-        
-        Args:
-            container_name (str): Name of the container
-            stage (str): Current stage
-        """
-        with self.lock:
-            if container_name not in self.container_stages:
-                self.container_stages[container_name] = set()
-            self.container_stages[container_name].add(stage)
-            self.progress_bar.set_postfix_str(f"Container: {container_name} - Stage: {stage}")
-    
-    def increment(self):
-        """Increment progress by one step."""
-        with self.lock:
-            self.current += 1
-            self.progress_bar.update(1)
-    
-    def clear(self):
-        """Clear the progress bar."""
-        with self.lock:
-            self.progress_bar.clear()
-    
-    def refresh(self):
-        """Refresh the progress bar."""
-        with self.lock:
-            self.progress_bar.refresh()
-    
-    def close(self):
-        """Close the progress bar."""
-        with self.lock:
-            self.progress_bar.close()
-
-def write_failed_containers(status, print_manager):
-    """
-    Write information about failed containers to a file.
-    
-    Args:
-        status (dict): Container status dictionary
-        print_manager (PrintManager): Print manager instance
-    """
-    failed_containers = {
-        container: {
-            'status': info['status'],
-            'image': info.get('image_name', 'unknown'),
-            'debug_command': info.get('debug_command', '')
-        }
-        for container, info in status.items()
-        if info['status'] != 'success'
-    }
-    
-    if failed_containers:
-        with open('failed_containers.txt', 'w') as f:
-            f.write("Failed Containers Information:\n")
-            f.write("============================\n\n")
-            for container, info in failed_containers.items():
-                f.write(f"Container: {container}\n")
-                f.write(f"Status: {info['status']}\n")
-                f.write(f"Image: {info['image']}\n")
-                f.write(f"Debug Command: {info['debug_command']}\n")
-                f.write("-" * 50 + "\n\n")
-        
-        print_manager.print(f"\nFailed containers information written to failed_containers.txt")
-        print_manager.print("\nTo debug a failed container, use the debug command provided in failed_containers.txt")
+            if 'build_log' in result:
+                print_manager.print("\nBuild log:")
+                print_manager.print_file(result['build_log'])
+            
+            if 'run_log' in result:
+                print_manager.print("\nRun log:")
+                print_manager.print_file(result['run_log'])
 
 class LogManager:
     """
@@ -711,6 +604,28 @@ class LogManager:
             print_manager.print("\nSee failed_containers.txt for debug commands")
             return True
         return False
+    
+    def print_failure_logs(self, status, print_manager):
+        """
+        Print logs for failed builds/runs.
+        
+        Args:
+            status (dict): Status dictionary
+            print_manager (PrintManager): Print manager for output
+        """
+        for container, result in status.items():
+            if result['status'] != 'success':
+                print_manager.print(f"\nFailure detected for {container}:")
+                print_manager.print(f"Status: {result['status']}")
+                print_manager.print(f"Exit code: {result['code']}")
+                
+                if 'build_log' in result:
+                    print_manager.print("\nBuild log:")
+                    print_manager.print_file(result['build_log'])
+                
+                if 'run_log' in result:
+                    print_manager.print("\nRun log:")
+                    print_manager.print_file(result['run_log'])
 
 class DockerManager:
     """
@@ -1018,22 +933,6 @@ def docker_worker(dockerfile_path, image_name, container_name, status, status_lo
     finally:
         progress_manager.increment()
 
-def print_failure_logs(status, print_manager):
-    """Print logs for failed builds/runs"""
-    for container, result in status.items():
-        if result['status'] != 'success':
-            print_manager.print(f"\nFailure detected for {container}:")
-            print_manager.print(f"Status: {result['status']}")
-            print_manager.print(f"Exit code: {result['code']}")
-            
-            if 'build_log' in result:
-                print_manager.print("\nBuild log:")
-                print_manager.print_file(result['build_log'])
-            
-            if 'run_log' in result:
-                print_manager.print("\nRun log:")
-                print_manager.print_file(result['run_log'])
-
 def sanitize_tag(tag):
     """
     Sanitize tag name to be compatible with Docker/Podman.
@@ -1218,7 +1117,8 @@ class BuildManager:
             self.print_manager.print("\nBuild Status:")
             self.print_manager.pprint(self.status)
             
-            # Write failed containers information
+            # Print failure logs and write failed containers information
+            self.log_manager.print_failure_logs(self.status, self.print_manager)
             if self.log_manager.write_failed_containers(self.status, self.print_manager):
                 return 1
                 
