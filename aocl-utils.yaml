@@ -7,13 +7,13 @@ platforms:
   #   depends:
   #     - cmake
   #     - qemu
-  # - name: Ubuntu 24.04
-  #   image: ubuntu
-  #   version: 24.04
-  #   update-cmd: "apt update; apt upgrade -y"
-  #   requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
-  #   depends:
-  #     - cmake
+  - name: Ubuntu 24.04
+    image: ubuntu
+    version: "24.04"
+    update-cmd: "apt update; apt upgrade -y"
+    requirements-cmd: "apt install -y build-essential git vim clang g++ gcc lsb-release curl wget python3 python3-pip ninja-build qemu-user"
+    depends:
+      - cmake
   - name: Ubuntu 24.10
     image: ubuntu
     version: "24.10"
